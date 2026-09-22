@@ -1,0 +1,21 @@
+{
+  "name": "clay-tables-pack",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Superhuman/Coda Pack for querying Clay tables through the Clay Public API.",
+  "scripts": {
+    "build": "packs build pack.ts",
+    "validate": "packs validate pack.ts",
+    "auth": "packs auth pack.ts",
+    "query": "packs execute pack.ts QueryClayTables"
+  },
+  "dependencies": {
+    "@codahq/packs-sdk": "latest"
+  },
+  "overrides": {
+    "qs": "6.16.0"
+  },
+  "devDependencies": {
+    "typescript": "latest"
+  }
+}

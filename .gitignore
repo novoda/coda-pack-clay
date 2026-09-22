@@ -1,0 +1,6 @@
+node_modules/
+dist/
+_upload_build/
+.coda.json
+.coda-pack.json
+*.log
