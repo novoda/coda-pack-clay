@@ -4,6 +4,7 @@
   "private": true,
   "description": "Superhuman/Coda Pack for querying Clay tables through the Clay Public API.",
   "scripts": {
+    "test": "node --test tests/*.test.cjs",
     "build": "packs build pack.ts",
     "validate": "packs validate pack.ts",
     "auth": "packs auth pack.ts",

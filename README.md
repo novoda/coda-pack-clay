@@ -9,6 +9,8 @@ The Packs SDK was renamed from Coda Packs to Superhuman Packs in 2026, but Coda 
 - `QueryClayTables(queryJson, limit, cursor)`: runs a raw Clay structured query and returns JSON strings for rows, unwrapped values, field metadata, the next cursor, and truncation state.
 - `ClayTableId(tableIdOrUrl)`: extracts `t_...` table IDs from Clay table URLs.
 - `SendToClayWebhook(webhookUrl, payloadJson)`: action formula for a Coda button that sends a JSON object to a Clay table or workflow webhook.
+- `ClayCompany` and `ClayPerson` column formats: accept a Clay ID or the corresponding LinkedIn URL and expose a typed input chip. `ClayPerson` also accepts enrichment JSON, exposes common person fields, and retains the entire response.
+- `EnrichClayCompany(webhookUrl, identifier)` and `EnrichClayPerson(webhookUrl, identifier)`: explicit button actions that send the typed input to a Clay webhook workflow.
 - `ClayRows` sync table: syncs rows from one known Clay table into a document.
 - `TypedClayTable` dynamic sync table: discovers Clay fields and syncs them into native Coda columns.
 - `People` dynamic sync table: syncs a people-oriented Clay table with a distinct `ClayPerson` identity.
@@ -109,6 +111,35 @@ Clay::SendToClayWebhook(
 ```
 
 The action accepts only HTTPS URLs hosted on `clay.com`. It sends the JSON object exactly once per button execution and returns the HTTP status and response body. Include a stable source ID in the payload when the Clay workflow needs to update or deduplicate an existing person or company; a webhook source otherwise commonly creates a new row.
+
+## Typed Clay Inputs and Enrichment
+
+In a Superhuman Docs table, choose the `ClayCompany` or `ClayPerson` column format. Enter a Clay ID, a LinkedIn company URL (`linkedin.com/company/...`), or a LinkedIn profile URL (`linkedin.com/in/...`) as appropriate. These formats normalize and display the input; they do not call Clay or trigger enrichment when a cell recalculates.
+
+Use a button or Coda automation with `EnrichClayCompany()` or `EnrichClayPerson()` to explicitly start the workflow. The action returns the same typed object as the input column, augmented with `enrichmentStatus` and `enrichmentResponseJson`, so configure the action result to update that same `ClayCompany` or `ClayPerson` column. For example:
+
+```text
+Clay::EnrichClayCompany(
+  "https://api.clay.com/v3/sources/webhook/...",
+  thisRow.Company.Identifier
+)
+```
+
+The action posts a JSON object with `entityType` (`company` or `person`), `identifierType` (`clay_id` or `linkedin_url`), and `identifier`. Configure the Clay webhook workflow to map these fields to its input columns and run the desired enrichment steps. The action result includes the immediate webhook response body, not a guarantee that asynchronous enrichment has completed. If Clay returns only an acknowledgment, the final enriched fields still need to be read from a Clay table with ClayQL sync enabled; webhook source tables that return the `Tables do not have ClayQL sync enabled` error cannot be read by this pack's query endpoint.
+
+### Store enrichment JSON in ClayPerson
+
+Once the updated Pack version is uploaded and installed in your doc, the callback automation can write a JSON object **serialized as text** directly into an editable `ClayPerson` column. Do not send a nested object as the cell value or a JSON array of people. For example, this is the text to store in the cell:
+
+```json
+{"clayId":"person_123","name":"Jane Doe","email":"jane@example.com","linkedinUrl":"https://www.linkedin.com/in/jane-doe/","title":"Engineer","company":{"name":"Example"},"location":"London","customEnrichment":{"score":82}}
+```
+
+The chip displays `Jane Doe`. Its properties include Name, First name, Last name, Email, Linkedin URL, Clay ID, Title, Company, Location, Identifier, Identifier type, and Raw JSON. `Raw JSON` retains the complete input, including custom fields and nested objects. Properties can be referenced from another column, for example `thisRow.Person.Email` and `thisRow.Person.[Raw JSON]` when the column is named `Person`.
+
+The parser accepts a person object at the top level or inside `person`, `data`, or `data.person`. Field matching ignores capitalization, spaces, underscores, and punctuation. Common aliases include `full_name`, `first_name`, `last_name`, `work_email`, `linkedin_url`, `job_title`, and `company_name`; a nested `company.name` is also supported. A person-level `id` is treated as a Clay ID. For predictable mapping, have your callback use the explicit keys in the example. Arbitrary nested provider-specific fields are retained in Raw JSON but are not automatically mapped to chip properties.
+
+JSON without an ID or LinkedIn URL can still be stored and displayed. Calling `EnrichClayPerson` on that JSON requires adding `clayId`, `linkedinUrl`, or `identifier` first. Existing URL and ID inputs continue to work. Saving JSON does not start enrichment or install a callback automation; it formats the value supplied by your existing automation. Ensure the callback matches the source row and current request before replacing its person value.
 
 Column types are inferred from Clay field metadata and sampled values. The Pack emits native numbers and booleans and applies Coda hints for ISO dates, date-times, URLs, and email addresses. Ambiguous identifiers such as phone numbers and postal codes remain text.
 

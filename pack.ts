@@ -85,6 +85,57 @@ const ClayWebhookResultSchema = sdk.makeObjectSchema({
   displayProperty: "summary",
 });
 
+const ClayEntityInputSchema = sdk.makeObjectSchema({
+  properties: {
+    display: {
+      type: sdk.ValueType.String,
+      required: true,
+      description: "The Clay ID or LinkedIn URL entered for this company or person.",
+    },
+    identifier: {
+      type: sdk.ValueType.String,
+      required: true,
+      description: "The normalized Clay ID or LinkedIn URL to send to Clay.",
+    },
+    identifierType: {
+      type: sdk.ValueType.String,
+      required: true,
+      description: "Whether the identifier is a Clay ID or LinkedIn URL.",
+    },
+    enrichmentStatus: {
+      type: sdk.ValueType.String,
+      description: "The immediate status returned by the Clay enrichment webhook.",
+    },
+    enrichmentResponseJson: {
+      type: sdk.ValueType.String,
+      description: "The immediate response body returned by the Clay webhook, encoded as JSON or text.",
+    },
+  },
+  displayProperty: "display",
+});
+
+const ClayPersonSchema = sdk.makeObjectSchema({
+  properties: {
+    ...ClayEntityInputSchema.properties,
+    name: { type: sdk.ValueType.String, description: "The person's full name." },
+    firstName: { type: sdk.ValueType.String, displayName: "First name" },
+    lastName: { type: sdk.ValueType.String, displayName: "Last name" },
+    email: { type: sdk.ValueType.String, codaType: sdk.ValueHintType.Email },
+    linkedinUrl: { type: sdk.ValueType.String, codaType: sdk.ValueHintType.Url, displayName: "LinkedIn URL" },
+    clayId: { type: sdk.ValueType.String, displayName: "Clay ID" },
+    title: { type: sdk.ValueType.String },
+    company: { type: sdk.ValueType.String },
+    location: { type: sdk.ValueType.String },
+    rawJson: {
+      type: sdk.ValueType.String,
+      displayName: "Raw JSON",
+      description: "The complete enrichment JSON, including fields not exposed by this format.",
+    },
+  },
+  displayProperty: "display",
+  featuredProperties: ["name", "email", "title", "company", "linkedinUrl", "rawJson"],
+});
+
 const ClayRowSchema = sdk.makeObjectSchema({
   properties: {
     id: {
@@ -202,6 +253,56 @@ pack.addFormula({
   },
 });
 
+pack.addColumnFormat({
+  name: "ClayCompany",
+  instructions: "Enter a Clay ID or LinkedIn company URL. Use EnrichClayCompany in a button to send it to a Clay webhook workflow.",
+  formulaName: "ClayCompanyInput",
+  matchers: [new RegExp("^https?://(?:www\\.)?linkedin\\.com/company/", "i")],
+});
+
+pack.addColumnFormat({
+  name: "ClayPerson",
+  instructions: "Enter a Clay ID, LinkedIn profile URL, or a JSON object returned by enrichment. Save webhook JSON as text in this column to display the enriched person.",
+  formulaName: "ClayPersonInput",
+  matchers: [new RegExp("^https?://(?:www\\.)?linkedin\\.com/in/", "i")],
+});
+
+pack.addFormula({
+  name: "ClayCompanyInput",
+  description: "Converts a Clay company ID or LinkedIn company URL into a typed ClayCompany value.",
+  parameters: [
+    sdk.makeParameter({
+      type: sdk.ParameterType.String,
+      name: "identifier",
+      description: "Clay company ID or LinkedIn company URL.",
+    }),
+  ],
+  resultType: sdk.ValueType.Object,
+  schema: ClayEntityInputSchema,
+  connectionRequirement: sdk.ConnectionRequirement.None,
+  execute: async function ([identifier]) {
+    return makeClayEntityInput(identifier, "company");
+  },
+});
+
+pack.addFormula({
+  name: "ClayPersonInput",
+  description: "Converts a Clay person ID, LinkedIn profile URL, or enrichment JSON object into a ClayPerson value, preserving the full JSON.",
+  parameters: [
+    sdk.makeParameter({
+      type: sdk.ParameterType.String,
+      name: "identifier",
+      description: "Clay person ID, LinkedIn profile URL, or enrichment JSON object encoded as text.",
+    }),
+  ],
+  resultType: sdk.ValueType.Object,
+  schema: ClayPersonSchema,
+  connectionRequirement: sdk.ConnectionRequirement.None,
+  execute: async function ([identifier]) {
+    return makeClayPersonInput(identifier);
+  },
+});
+
 pack.addFormula({
   name: "SendToClayWebhook",
   description: "Posts a JSON object to a Clay table or workflow webhook. Use this formula in a Coda button.",
@@ -224,24 +325,78 @@ pack.addFormula({
   execute: async function ([webhookUrl, payloadJson], context) {
     const url = validateClayWebhookUrl(webhookUrl);
     const payload = parseJsonObject(payloadJson, "payloadJson");
-    try {
-      const response = await context.fetcher.fetch({
-        method: "POST",
-        url,
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-        cacheTtlSecs: 0,
-      });
-      return {
-        summary: `Sent to Clay (${response.status}).`,
-        statusCode: response.status,
-        responseJson: serializeResponseBody(response.body),
-      };
-    } catch (error) {
-      throw new sdk.UserVisibleError(formatClayError(error));
+    return sendClayWebhook(context, url, payload);
+  },
+});
+
+pack.addFormula({
+  name: "EnrichClayCompany",
+  description: "Sends a Clay company ID or LinkedIn company URL to a Clay webhook workflow for creation and enrichment.",
+  parameters: [
+    sdk.makeParameter({
+      type: sdk.ParameterType.String,
+      name: "webhookUrl",
+      description: "HTTPS URL for the Clay company enrichment webhook workflow.",
+    }),
+    sdk.makeParameter({
+      type: sdk.ParameterType.String,
+      name: "identifier",
+      description: "Clay company ID or LinkedIn company URL. A ClayCompany value's identifier property can be used here.",
+    }),
+  ],
+  resultType: sdk.ValueType.Object,
+  schema: ClayEntityInputSchema,
+  isAction: true,
+  connectionRequirement: sdk.ConnectionRequirement.None,
+  execute: async function ([webhookUrl, identifier], context) {
+    const entity = makeClayEntityInput(identifier, "company");
+    const result = await sendClayWebhook(context, validateClayWebhookUrl(webhookUrl), {
+      entityType: "company",
+      identifier: entity.identifier,
+      identifierType: entity.identifierType,
+    });
+    return {
+      ...entity,
+      enrichmentStatus: result.summary,
+      enrichmentResponseJson: result.responseJson,
+    };
+  },
+});
+
+pack.addFormula({
+  name: "EnrichClayPerson",
+  description: "Sends a Clay person ID or LinkedIn profile URL to a Clay webhook workflow for creation and enrichment.",
+  parameters: [
+    sdk.makeParameter({
+      type: sdk.ParameterType.String,
+      name: "webhookUrl",
+      description: "HTTPS URL for the Clay person enrichment webhook workflow.",
+    }),
+    sdk.makeParameter({
+      type: sdk.ParameterType.String,
+      name: "identifier",
+      description: "Clay person ID or LinkedIn profile URL. A ClayPerson value's identifier property can be used here.",
+    }),
+  ],
+  resultType: sdk.ValueType.Object,
+  schema: ClayPersonSchema,
+  isAction: true,
+  connectionRequirement: sdk.ConnectionRequirement.None,
+  execute: async function ([webhookUrl, identifier], context) {
+    const entity = makeClayPersonInput(identifier);
+    if (!entity.identifier) {
+      throw new sdk.UserVisibleError("This person JSON has no Clay ID or LinkedIn URL. Include clayId or linkedinUrl before requesting enrichment.");
     }
+    const result = await sendClayWebhook(context, validateClayWebhookUrl(webhookUrl), {
+      entityType: "person",
+      identifier: entity.identifier,
+      identifierType: entity.identifierType,
+    });
+    return {
+      ...entity,
+      enrichmentStatus: result.summary,
+      enrichmentResponseJson: result.responseJson,
+    };
   },
 });
 
@@ -1190,6 +1345,137 @@ export function validateClayWebhookUrl(webhookUrl: string): string {
     throw new sdk.UserVisibleError("webhookUrl must not contain URL credentials.");
   }
   return url.toString();
+}
+
+export function makeClayPersonInput(input: string): {
+  display: string;
+  identifier: string;
+  identifierType: string;
+  [key: string]: string | undefined;
+} {
+  const trimmed = input.trim();
+  if (!/^[{\[]/.test(trimmed)) {
+    return makeClayEntityInput(input, "person");
+  }
+
+  const payload = parseJsonObject(trimmed, "Person JSON");
+  // Prefer the person object over envelope metadata, while retaining the complete payload.
+  const data = isPlainObject(payload.data) ? payload.data : undefined;
+  const person = isPlainObject(payload.person) ? payload.person
+    : data && isPlainObject(data.person) ? data.person
+    : data || payload;
+  const fields = new Map(Object.entries(person).map(([key, value]) => [normalizeFieldLookupKey(key), value]));
+  function field(...aliases: string[]): string | undefined {
+    for (const alias of aliases) {
+      const value = fields.get(normalizeFieldLookupKey(alias));
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return String(value);
+      }
+    }
+    return undefined;
+  }
+
+  const firstName = field("firstName", "givenName");
+  const lastName = field("lastName", "familyName");
+  const name = field("name", "fullName") || [firstName, lastName].filter(Boolean).join(" ") || undefined;
+  const email = field("email", "workEmail", "emailAddress");
+  const clayId = field("clayId", "clayPersonId", "personId", "id");
+  const linkedinUrl = field("linkedinUrl", "linkedinProfileUrl", "linkedin", "linkedinProfile");
+  const sourceIdentifier = clayId || linkedinUrl || field("identifier");
+  const entity = sourceIdentifier ? makeClayEntityInput(sourceIdentifier, "person") : undefined;
+  const companyValue = fields.get("company");
+  const company = field("company", "companyName", "organizationName") ||
+    (isPlainObject(companyValue) && typeof companyValue.name === "string" ? companyValue.name : undefined);
+
+  return {
+    display: name || email || entity?.display || "Enriched person",
+    identifier: entity?.identifier || "",
+    identifierType: entity?.identifierType || "json",
+    name,
+    firstName,
+    lastName,
+    email,
+    clayId,
+    linkedinUrl,
+    title: field("title", "jobTitle", "headline"),
+    company,
+    location: field("location", "city"),
+    rawJson: trimmed,
+  };
+}
+
+function makeClayEntityInput(
+  identifier: string,
+  entityType: "company" | "person",
+): { display: string; identifier: string; identifierType: string } {
+  const input = cleanOptionalString(identifier);
+  if (!input) {
+    throw new sdk.UserVisibleError("Enter a Clay ID or LinkedIn URL.");
+  }
+
+  const candidateUrl = /^https?:\/\//i.test(input)
+    ? input
+    : /^(?:www\.)?linkedin\.com\//i.test(input)
+      ? `https://${input}`
+      : undefined;
+  if (!candidateUrl) {
+    return {
+      display: input,
+      identifier: input,
+      identifierType: "clay_id",
+    };
+  }
+
+  let url: URL;
+  try {
+    url = new URL(candidateUrl);
+  } catch {
+    throw new sdk.UserVisibleError("Enter a valid LinkedIn URL or Clay ID.");
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" || (hostname !== "linkedin.com" && hostname !== "www.linkedin.com")) {
+    throw new sdk.UserVisibleError("LinkedIn identifiers must use an HTTPS linkedin.com URL.");
+  }
+
+  const expectedPath = entityType === "company" ? /^\/company\/[^/]+/i : /^\/in\/[^/]+/i;
+  if (!expectedPath.test(url.pathname)) {
+    const expected = entityType === "company" ? "/company/" : "/in/";
+    throw new sdk.UserVisibleError(`Enter a LinkedIn ${entityType} URL containing ${expected}.`);
+  }
+
+  return {
+    display: url.toString(),
+    identifier: url.toString(),
+    identifierType: "linkedin_url",
+  };
+}
+
+async function sendClayWebhook(
+  context: sdk.ExecutionContext,
+  url: string,
+  payload: Record<string, unknown>,
+) {
+  try {
+    const response = await context.fetcher.fetch({
+      method: "POST",
+      url,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      cacheTtlSecs: 0,
+    });
+    return {
+      summary: `Sent to Clay (${response.status}).`,
+      statusCode: response.status,
+      responseJson: serializeResponseBody(response.body),
+    };
+  } catch (error) {
+    throw new sdk.UserVisibleError(formatClayError(error));
+  }
 }
 
 function serializeResponseBody(body: unknown): string {
